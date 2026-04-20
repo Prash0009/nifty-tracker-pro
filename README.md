@@ -4,6 +4,8 @@ A small 5-minute NIFTY/BANKNIFTY option signal tracker for learning, paper-tradi
 
 It fetches live NIFTY 50 and NIFTY BANK snapshots from NSE, checks simple live trend/breadth setups, and prints/sends the strongest option idea every 5 minutes during NSE market hours.
 
+Every alert includes both index checks, so you can see the NIFTY and BANKNIFTY status even when only one is recommended.
+
 > This is not financial advice. Use it for education, backtesting, and paper trading before risking capital.
 
 ## Features

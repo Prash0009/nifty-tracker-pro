@@ -39,6 +39,7 @@ class Signal:
     score: float = 0
     stop_loss: float | None = None
     target: float | None = None
+    details: tuple["Signal", ...] = ()
 
     def alert_key(self) -> str:
         return (
@@ -299,7 +300,20 @@ def build_best_live_option_signal(max_candle_age_minutes: int = 15) -> Signal:
     actionable = [signal for signal in signals if signal.side == "BUY" and signal.option_type]
 
     if actionable:
-        return max(actionable, key=lambda signal: signal.score)
+        recommended = max(actionable, key=lambda signal: signal.score)
+        return Signal(
+            side=recommended.side,
+            price=recommended.price,
+            time=recommended.time,
+            reason=recommended.reason,
+            instrument=recommended.instrument,
+            option_type=recommended.option_type,
+            strike=recommended.strike,
+            score=recommended.score,
+            stop_loss=recommended.stop_loss,
+            target=recommended.target,
+            details=tuple(signals),
+        )
 
     return Signal(
         side="WAIT",
@@ -310,6 +324,7 @@ def build_best_live_option_signal(max_candle_age_minutes: int = 15) -> Signal:
         reason="No clean option-buy setup. " + " | ".join(
             f"{signal.instrument}: {signal.reason}" for signal in signals
         ),
+        details=tuple(signals),
     )
 
 
@@ -381,6 +396,23 @@ def format_signal(signal: Signal) -> str:
     if signal.stop_loss is not None and signal.target is not None:
         lines.append(f"Underlying stop-loss: {signal.stop_loss:.2f}")
         lines.append(f"Underlying target: {signal.target:.2f}")
+
+    if signal.details:
+        lines.append("")
+        lines.append("Both index checks:")
+        for detail in signal.details:
+            if detail.option_type and detail.strike:
+                status = f"BUY {detail.instrument} {detail.strike} {detail.option_type}"
+            else:
+                status = "WAIT"
+
+            marker = "Recommended" if (
+                detail.instrument == signal.instrument
+                and detail.option_type == signal.option_type
+                and detail.strike == signal.strike
+            ) else "Also checked"
+            lines.append(f"- {marker}: {detail.instrument}: {status}")
+            lines.append(f"  Spot {detail.price:.2f}. {detail.reason}")
 
     return "\n".join(lines)
 
