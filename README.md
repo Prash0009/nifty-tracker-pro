@@ -45,6 +45,23 @@ python nifty_pro_tracker.py --once
 python nifty_pro_tracker.py
 ```
 
+## Run From GitHub Actions
+
+This repo includes a GitHub Actions workflow at `.github/workflows/nifty-signals.yml`.
+
+It runs every 5 minutes on weekdays during the broad NSE window and also supports manual runs from the GitHub Actions tab. The Python script still checks NSE market hours in IST before sending alerts.
+
+To send Telegram alerts from GitHub:
+
+1. Open your GitHub repo.
+2. Go to `Settings` > `Secrets and variables` > `Actions`.
+3. Add these repository secrets:
+   - `TELEGRAM_BOT_TOKEN`
+   - `TELEGRAM_CHAT_ID`
+4. Go to `Actions` > `NIFTY 5m Signals` > `Run workflow` to test it.
+
+GitHub schedules are not guaranteed to fire at the exact second. They are good enough for lightweight alerting, but use a broker/VPS setup for serious live trading automation.
+
 ## Tune The Strategy
 
 The default rules are intentionally simple:
