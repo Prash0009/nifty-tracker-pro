@@ -2,17 +2,16 @@
 
 A small 5-minute NIFTY 50 signal tracker for learning, paper-trading, and alerting.
 
-It fetches intraday candles for `^NSEI`, calculates trend and momentum indicators, and prints/sends a signal every 5 minutes during NSE market hours.
+It fetches a live NIFTY 50 snapshot from NSE, checks a simple live trend/breadth setup, and prints/sends a signal every 5 minutes during NSE market hours.
 
 > This is not financial advice. Use it for education, backtesting, and paper trading before risking capital.
 
 ## Features
 
-- 5-minute NIFTY 50 candles
-- EMA 9 / EMA 21 trend signal
-- RSI momentum filter
-- MACD confirmation
-- ATR-based stop-loss and target levels
+- NSE live NIFTY 50 snapshot
+- Live price/open/previous-close trend check
+- NIFTY 50 advance/decline breadth filter
+- Range-based stop-loss and target levels
 - Duplicate alert protection
 - Stale-data protection
 - Optional Telegram alerts
@@ -69,12 +68,12 @@ GitHub schedules are not guaranteed to fire at the exact second. They are good e
 
 The default rules are intentionally simple:
 
-- `BUY`: EMA 9 is above EMA 21, MACD histogram is positive, and RSI is between 50 and 72.
-- `SELL`: EMA 9 is below EMA 21, MACD histogram is negative, and RSI is between 28 and 50.
+- `BUY`: Live NIFTY is above open and previous close, advances are greater than declines, price change is at least 0.15%, and price is in the upper part of the intraday range.
+- `SELL`: Live NIFTY is below open and previous close, declines are greater than advances, price change is at most -0.15%, and price is in the lower part of the intraday range.
 - `WAIT`: Anything else.
 
 You can edit these thresholds in `nifty_pro_tracker.py`.
 
 ## Data Note
 
-Free sources can be delayed, rate-limited, or incomplete. For live trading, use a broker API or an official licensed market data feed.
+The default source is NSE's live index snapshot endpoint. Official exchange-grade real-time tick feeds and 1/2/5-minute snapshot files are paid NSE Data & Analytics products. For serious live trading automation, use a broker API or licensed market data feed.

@@ -16,6 +16,9 @@ from dotenv import load_dotenv
 IST = ZoneInfo("Asia/Kolkata")
 SYMBOL = "^NSEI"
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+NSE_HOME_URL = "https://www.nseindia.com/market-data/live-market-indices"
+NSE_INDICES_URL = "https://www.nseindia.com/api/allIndices"
+NSE_INDEX_NAME = "NIFTY 50"
 
 SignalSide = Literal["BUY", "SELL", "WAIT"]
 
@@ -33,6 +36,20 @@ class Signal:
         return f"{self.time.isoformat()}:{self.side}:{round(self.price, 2)}"
 
 
+@dataclass(frozen=True)
+class LiveIndexSnapshot:
+    index: str
+    last: float
+    open: float
+    high: float
+    low: float
+    previous_close: float
+    percent_change: float
+    advances: int
+    declines: int
+    timestamp: datetime
+
+
 def is_market_open(now: datetime | None = None) -> bool:
     now = now or datetime.now(IST)
     if now.weekday() >= 5:
@@ -41,6 +58,39 @@ def is_market_open(now: datetime | None = None) -> bool:
     market_open = clock_time(9, 15)
     market_close = clock_time(15, 30)
     return market_open <= now.time() <= market_close
+
+
+def fetch_nse_live_snapshot(index_name: str = NSE_INDEX_NAME) -> LiveIndexSnapshot:
+    session = requests.Session()
+    headers = {
+        "Accept": "application/json,text/plain,*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": NSE_HOME_URL,
+        "User-Agent": "Mozilla/5.0",
+    }
+    session.get(NSE_HOME_URL, headers=headers, timeout=20)
+    response = session.get(NSE_INDICES_URL, headers=headers, timeout=20)
+    response.raise_for_status()
+    payload = response.json()
+
+    timestamp = datetime.strptime(payload["timestamp"], "%d-%b-%Y %H:%M").replace(tzinfo=IST)
+    rows = payload.get("data", [])
+    row = next((item for item in rows if item.get("index") == index_name), None)
+    if not row:
+        raise RuntimeError(f"{index_name} was not found in NSE live indices data.")
+
+    return LiveIndexSnapshot(
+        index=row["index"],
+        last=float(row["last"]),
+        open=float(row["open"]),
+        high=float(row["high"]),
+        low=float(row["low"]),
+        previous_close=float(row["previousClose"]),
+        percent_change=float(row["percentChange"]),
+        advances=int(row.get("advances") or 0),
+        declines=int(row.get("declines") or 0),
+        timestamp=timestamp,
+    )
 
 
 def fetch_candles(symbol: str = SYMBOL, interval: str = "5m", range_: str = "5d") -> pd.DataFrame:
@@ -114,6 +164,77 @@ def add_indicators(frame: pd.DataFrame) -> pd.DataFrame:
     candles["atr"] = true_range.ewm(alpha=1 / 14, adjust=False).mean()
 
     return candles
+
+
+def build_live_signal(snapshot: LiveIndexSnapshot, max_candle_age_minutes: int = 15) -> Signal:
+    data_age = datetime.now(IST) - snapshot.timestamp
+    if data_age > timedelta(minutes=max_candle_age_minutes):
+        return Signal(
+            side="WAIT",
+            price=snapshot.last,
+            time=snapshot.timestamp,
+            reason=(
+                f"Stale NSE live data: latest update is {data_age} old. "
+                f"Max allowed age is {max_candle_age_minutes} minutes."
+            ),
+        )
+
+    intraday_range = max(snapshot.high - snapshot.low, 1.0)
+    close_location = (snapshot.last - snapshot.low) / intraday_range
+    risk_unit = max(intraday_range * 0.35, abs(snapshot.last - snapshot.previous_close) * 0.5, 10.0)
+
+    bullish = (
+        snapshot.last > snapshot.open
+        and snapshot.last > snapshot.previous_close
+        and snapshot.advances > snapshot.declines
+        and snapshot.percent_change >= 0.15
+        and close_location >= 0.60
+    )
+    bearish = (
+        snapshot.last < snapshot.open
+        and snapshot.last < snapshot.previous_close
+        and snapshot.declines > snapshot.advances
+        and snapshot.percent_change <= -0.15
+        and close_location <= 0.40
+    )
+
+    breadth = f"advances {snapshot.advances}, declines {snapshot.declines}"
+    if bullish:
+        return Signal(
+            side="BUY",
+            price=snapshot.last,
+            time=snapshot.timestamp,
+            reason=(
+                f"NSE live trend up: price above open/previous close, "
+                f"{breadth}, change {snapshot.percent_change:.2f}%"
+            ),
+            stop_loss=snapshot.last - risk_unit,
+            target=snapshot.last + (1.5 * risk_unit),
+        )
+
+    if bearish:
+        return Signal(
+            side="SELL",
+            price=snapshot.last,
+            time=snapshot.timestamp,
+            reason=(
+                f"NSE live trend down: price below open/previous close, "
+                f"{breadth}, change {snapshot.percent_change:.2f}%"
+            ),
+            stop_loss=snapshot.last + risk_unit,
+            target=snapshot.last - (1.5 * risk_unit),
+        )
+
+    return Signal(
+        side="WAIT",
+        price=snapshot.last,
+        time=snapshot.timestamp,
+        reason=(
+            f"No clean NSE live setup. Open {snapshot.open:.2f}, high {snapshot.high:.2f}, "
+            f"low {snapshot.low:.2f}, prev close {snapshot.previous_close:.2f}, "
+            f"{breadth}, change {snapshot.percent_change:.2f}%"
+        ),
+    )
 
 
 def build_signal(candles: pd.DataFrame, max_candle_age_minutes: int = 15) -> Signal:
@@ -205,7 +326,17 @@ def seconds_until_next_5m(now: datetime | None = None) -> int:
     return max(30, int(delta))
 
 
-def run_cycle(max_candle_age_minutes: int = 15) -> Signal:
+def run_cycle(source: str = "nse-live", max_candle_age_minutes: int = 15) -> Signal:
+    if source == "nse-live":
+        signal = build_live_signal(
+            fetch_nse_live_snapshot(),
+            max_candle_age_minutes=max_candle_age_minutes,
+        )
+        message = format_signal(signal)
+        print(message)
+        print()
+        return signal
+
     candles = add_indicators(fetch_candles())
     signal = build_signal(candles, max_candle_age_minutes=max_candle_age_minutes)
     message = format_signal(signal)
@@ -220,6 +351,12 @@ def main() -> None:
     parser.add_argument("--send-wait-alerts", action="store_true", help="Also send Telegram alerts for WAIT signals.")
     parser.add_argument("--ignore-market-hours", action="store_true", help="Run even outside NSE market hours.")
     parser.add_argument(
+        "--source",
+        choices=("nse-live", "yahoo"),
+        default="nse-live",
+        help="Market data source. nse-live uses NSE's live index snapshot endpoint.",
+    )
+    parser.add_argument(
         "--max-candle-age-minutes",
         type=int,
         default=15,
@@ -233,7 +370,7 @@ def main() -> None:
     while True:
         try:
             if args.ignore_market_hours or is_market_open():
-                signal = run_cycle(max_candle_age_minutes=args.max_candle_age_minutes)
+                signal = run_cycle(source=args.source, max_candle_age_minutes=args.max_candle_age_minutes)
                 if signal.alert_key() == last_alert_key:
                     print("Duplicate candle detected; alert already handled.")
                 elif signal.side != "WAIT" or args.send_wait_alerts:
