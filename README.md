@@ -14,6 +14,7 @@ It fetches intraday candles for `^NSEI`, calculates trend and momentum indicator
 - MACD confirmation
 - ATR-based stop-loss and target levels
 - Duplicate alert protection
+- Stale-data protection
 - Optional Telegram alerts
 - NSE market-hour guard
 
@@ -50,6 +51,8 @@ python nifty_pro_tracker.py
 This repo includes a GitHub Actions workflow at `.github/workflows/nifty-signals.yml`.
 
 It runs every 5 minutes on weekdays during the broad NSE window and also supports manual runs from the GitHub Actions tab. The Python script still checks NSE market hours in IST before sending alerts.
+
+The tracker refuses to send `BUY` or `SELL` alerts when the latest candle is older than 15 minutes. This protects you from stale free-data responses.
 
 To send Telegram alerts from GitHub:
 

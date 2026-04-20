@@ -116,11 +116,23 @@ def add_indicators(frame: pd.DataFrame) -> pd.DataFrame:
     return candles
 
 
-def build_signal(candles: pd.DataFrame) -> Signal:
+def build_signal(candles: pd.DataFrame, max_candle_age_minutes: int = 15) -> Signal:
     latest = candles.iloc[-1]
     price = float(latest["close"])
     atr = float(latest["atr"])
     candle_time = latest["time"].to_pydatetime()
+    candle_age = datetime.now(IST) - candle_time
+
+    if candle_age > timedelta(minutes=max_candle_age_minutes):
+        return Signal(
+            side="WAIT",
+            price=price,
+            time=candle_time,
+            reason=(
+                f"Stale data: latest candle is {candle_age} old. "
+                f"Max allowed age is {max_candle_age_minutes} minutes."
+            ),
+        )
 
     bullish = latest["ema_9"] > latest["ema_21"] and latest["macd_hist"] > 0 and 50 <= latest["rsi"] <= 72
     bearish = latest["ema_9"] < latest["ema_21"] and latest["macd_hist"] < 0 and 28 <= latest["rsi"] <= 50
@@ -193,9 +205,9 @@ def seconds_until_next_5m(now: datetime | None = None) -> int:
     return max(30, int(delta))
 
 
-def run_cycle() -> Signal:
+def run_cycle(max_candle_age_minutes: int = 15) -> Signal:
     candles = add_indicators(fetch_candles())
-    signal = build_signal(candles)
+    signal = build_signal(candles, max_candle_age_minutes=max_candle_age_minutes)
     message = format_signal(signal)
     print(message)
     print()
@@ -207,6 +219,12 @@ def main() -> None:
     parser.add_argument("--once", action="store_true", help="Run a single signal check and exit.")
     parser.add_argument("--send-wait-alerts", action="store_true", help="Also send Telegram alerts for WAIT signals.")
     parser.add_argument("--ignore-market-hours", action="store_true", help="Run even outside NSE market hours.")
+    parser.add_argument(
+        "--max-candle-age-minutes",
+        type=int,
+        default=15,
+        help="Do not produce BUY/SELL alerts when the latest candle is older than this many minutes.",
+    )
     args = parser.parse_args()
 
     load_dotenv()
@@ -215,7 +233,7 @@ def main() -> None:
     while True:
         try:
             if args.ignore_market_hours or is_market_open():
-                signal = run_cycle()
+                signal = run_cycle(max_candle_age_minutes=args.max_candle_age_minutes)
                 if signal.alert_key() == last_alert_key:
                     print("Duplicate candle detected; alert already handled.")
                 elif signal.side != "WAIT" or args.send_wait_alerts:
