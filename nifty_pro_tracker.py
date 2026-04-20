@@ -19,6 +19,10 @@ YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 NSE_HOME_URL = "https://www.nseindia.com/market-data/live-market-indices"
 NSE_INDICES_URL = "https://www.nseindia.com/api/allIndices"
 NSE_INDEX_NAME = "NIFTY 50"
+LIVE_INDEX_CONFIG = {
+    "NIFTY 50": {"display": "NIFTY", "strike_step": 50},
+    "NIFTY BANK": {"display": "BANKNIFTY", "strike_step": 100},
+}
 
 SignalSide = Literal["BUY", "SELL", "WAIT"]
 
@@ -29,11 +33,18 @@ class Signal:
     price: float
     time: datetime
     reason: str
+    instrument: str = "NIFTY"
+    option_type: str | None = None
+    strike: int | None = None
+    score: float = 0
     stop_loss: float | None = None
     target: float | None = None
 
     def alert_key(self) -> str:
-        return f"{self.time.isoformat()}:{self.side}:{round(self.price, 2)}"
+        return (
+            f"{self.time.isoformat()}:{self.instrument}:{self.side}:"
+            f"{self.option_type or 'NA'}:{self.strike or 'NA'}:{round(self.price, 2)}"
+        )
 
 
 @dataclass(frozen=True)
@@ -60,7 +71,7 @@ def is_market_open(now: datetime | None = None) -> bool:
     return market_open <= now.time() <= market_close
 
 
-def fetch_nse_live_snapshot(index_name: str = NSE_INDEX_NAME) -> LiveIndexSnapshot:
+def fetch_nse_live_snapshots(index_names: tuple[str, ...]) -> list[LiveIndexSnapshot]:
     session = requests.Session()
     headers = {
         "Accept": "application/json,text/plain,*/*",
@@ -75,22 +86,38 @@ def fetch_nse_live_snapshot(index_name: str = NSE_INDEX_NAME) -> LiveIndexSnapsh
 
     timestamp = datetime.strptime(payload["timestamp"], "%d-%b-%Y %H:%M").replace(tzinfo=IST)
     rows = payload.get("data", [])
-    row = next((item for item in rows if item.get("index") == index_name), None)
-    if not row:
-        raise RuntimeError(f"{index_name} was not found in NSE live indices data.")
+    snapshots: list[LiveIndexSnapshot] = []
+    missing: list[str] = []
 
-    return LiveIndexSnapshot(
-        index=row["index"],
-        last=float(row["last"]),
-        open=float(row["open"]),
-        high=float(row["high"]),
-        low=float(row["low"]),
-        previous_close=float(row["previousClose"]),
-        percent_change=float(row["percentChange"]),
-        advances=int(row.get("advances") or 0),
-        declines=int(row.get("declines") or 0),
-        timestamp=timestamp,
-    )
+    for index_name in index_names:
+        row = next((item for item in rows if item.get("index") == index_name), None)
+        if not row:
+            missing.append(index_name)
+            continue
+
+        snapshots.append(
+            LiveIndexSnapshot(
+                index=row["index"],
+                last=float(row["last"]),
+                open=float(row["open"]),
+                high=float(row["high"]),
+                low=float(row["low"]),
+                previous_close=float(row["previousClose"]),
+                percent_change=float(row["percentChange"]),
+                advances=int(row.get("advances") or 0),
+                declines=int(row.get("declines") or 0),
+                timestamp=timestamp,
+            )
+        )
+
+    if missing:
+        raise RuntimeError(f"Missing NSE live indices data for: {', '.join(missing)}")
+
+    return snapshots
+
+
+def fetch_nse_live_snapshot(index_name: str = NSE_INDEX_NAME) -> LiveIndexSnapshot:
+    return fetch_nse_live_snapshots((index_name,))[0]
 
 
 def fetch_candles(symbol: str = SYMBOL, interval: str = "5m", range_: str = "5d") -> pd.DataFrame:
@@ -166,13 +193,21 @@ def add_indicators(frame: pd.DataFrame) -> pd.DataFrame:
     return candles
 
 
+def nearest_strike(price: float, strike_step: int) -> int:
+    return int(round(price / strike_step) * strike_step)
+
+
 def build_live_signal(snapshot: LiveIndexSnapshot, max_candle_age_minutes: int = 15) -> Signal:
+    config = LIVE_INDEX_CONFIG.get(snapshot.index, {"display": snapshot.index, "strike_step": 50})
+    instrument = config["display"]
+    strike = nearest_strike(snapshot.last, int(config["strike_step"]))
     data_age = datetime.now(IST) - snapshot.timestamp
     if data_age > timedelta(minutes=max_candle_age_minutes):
         return Signal(
             side="WAIT",
             price=snapshot.last,
             time=snapshot.timestamp,
+            instrument=instrument,
             reason=(
                 f"Stale NSE live data: latest update is {data_age} old. "
                 f"Max allowed age is {max_candle_age_minutes} minutes."
@@ -182,6 +217,11 @@ def build_live_signal(snapshot: LiveIndexSnapshot, max_candle_age_minutes: int =
     intraday_range = max(snapshot.high - snapshot.low, 1.0)
     close_location = (snapshot.last - snapshot.low) / intraday_range
     risk_unit = max(intraday_range * 0.35, abs(snapshot.last - snapshot.previous_close) * 0.5, 10.0)
+    breadth_total = max(snapshot.advances + snapshot.declines, 1)
+    breadth_strength = abs(snapshot.advances - snapshot.declines) / breadth_total
+    trend_strength = abs(snapshot.last - snapshot.open) / intraday_range
+    momentum_strength = abs(snapshot.percent_change)
+    score = (momentum_strength * 100) + (breadth_strength * 25) + (trend_strength * 25)
 
     bullish = (
         snapshot.last > snapshot.open
@@ -204,8 +244,13 @@ def build_live_signal(snapshot: LiveIndexSnapshot, max_candle_age_minutes: int =
             side="BUY",
             price=snapshot.last,
             time=snapshot.timestamp,
+            instrument=instrument,
+            option_type="CE",
+            strike=strike,
+            score=score,
             reason=(
-                f"NSE live trend up: price above open/previous close, "
+                f"NSE live trend up: buy ATM {instrument} {strike} CE. "
+                f"Price above open/previous close, "
                 f"{breadth}, change {snapshot.percent_change:.2f}%"
             ),
             stop_loss=snapshot.last - risk_unit,
@@ -214,11 +259,16 @@ def build_live_signal(snapshot: LiveIndexSnapshot, max_candle_age_minutes: int =
 
     if bearish:
         return Signal(
-            side="SELL",
+            side="BUY",
             price=snapshot.last,
             time=snapshot.timestamp,
+            instrument=instrument,
+            option_type="PE",
+            strike=strike,
+            score=score,
             reason=(
-                f"NSE live trend down: price below open/previous close, "
+                f"NSE live trend down: buy ATM {instrument} {strike} PE. "
+                f"Price below open/previous close, "
                 f"{breadth}, change {snapshot.percent_change:.2f}%"
             ),
             stop_loss=snapshot.last + risk_unit,
@@ -229,10 +279,36 @@ def build_live_signal(snapshot: LiveIndexSnapshot, max_candle_age_minutes: int =
         side="WAIT",
         price=snapshot.last,
         time=snapshot.timestamp,
+        instrument=instrument,
+        strike=strike,
+        score=score,
         reason=(
             f"No clean NSE live setup. Open {snapshot.open:.2f}, high {snapshot.high:.2f}, "
             f"low {snapshot.low:.2f}, prev close {snapshot.previous_close:.2f}, "
             f"{breadth}, change {snapshot.percent_change:.2f}%"
+        ),
+    )
+
+
+def build_best_live_option_signal(max_candle_age_minutes: int = 15) -> Signal:
+    snapshots = fetch_nse_live_snapshots(tuple(LIVE_INDEX_CONFIG.keys()))
+    signals = [
+        build_live_signal(snapshot, max_candle_age_minutes=max_candle_age_minutes)
+        for snapshot in snapshots
+    ]
+    actionable = [signal for signal in signals if signal.side == "BUY" and signal.option_type]
+
+    if actionable:
+        return max(actionable, key=lambda signal: signal.score)
+
+    return Signal(
+        side="WAIT",
+        price=signals[0].price,
+        time=max(signal.time for signal in signals),
+        instrument="NIFTY/BANKNIFTY",
+        score=max(signal.score for signal in signals),
+        reason="No clean option-buy setup. " + " | ".join(
+            f"{signal.instrument}: {signal.reason}" for signal in signals
         ),
     )
 
@@ -287,16 +363,24 @@ def build_signal(candles: pd.DataFrame, max_candle_age_minutes: int = 15) -> Sig
 
 
 def format_signal(signal: Signal) -> str:
+    title = "NIFTY/BANKNIFTY 5m Option Signal"
+    if signal.option_type and signal.strike:
+        title = f"{signal.instrument} {signal.strike} {signal.option_type} Signal"
+
     lines = [
-        f"NIFTY 5m Signal: {signal.side}",
+        f"{title}: {signal.side}",
         f"Time: {signal.time:%Y-%m-%d %H:%M %Z}",
-        f"Price: {signal.price:.2f}",
+        f"Underlying: {signal.instrument}",
+        f"Spot price: {signal.price:.2f}",
         f"Reason: {signal.reason}",
     ]
 
+    if signal.option_type and signal.strike:
+        lines.insert(3, f"Option idea: BUY {signal.instrument} {signal.strike} {signal.option_type}")
+
     if signal.stop_loss is not None and signal.target is not None:
-        lines.append(f"Stop-loss: {signal.stop_loss:.2f}")
-        lines.append(f"Target: {signal.target:.2f}")
+        lines.append(f"Underlying stop-loss: {signal.stop_loss:.2f}")
+        lines.append(f"Underlying target: {signal.target:.2f}")
 
     return "\n".join(lines)
 
@@ -328,10 +412,7 @@ def seconds_until_next_5m(now: datetime | None = None) -> int:
 
 def run_cycle(source: str = "nse-live", max_candle_age_minutes: int = 15) -> Signal:
     if source == "nse-live":
-        signal = build_live_signal(
-            fetch_nse_live_snapshot(),
-            max_candle_age_minutes=max_candle_age_minutes,
-        )
+        signal = build_best_live_option_signal(max_candle_age_minutes=max_candle_age_minutes)
         message = format_signal(signal)
         print(message)
         print()

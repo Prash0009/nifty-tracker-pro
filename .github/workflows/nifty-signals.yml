@@ -1,4 +1,4 @@
-name: NIFTY 5m Signals
+name: NIFTY/BANKNIFTY 5m Option Signals
 
 on:
   schedule:
@@ -23,7 +23,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run NIFTY signal check
+      - name: Run option signal check
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
