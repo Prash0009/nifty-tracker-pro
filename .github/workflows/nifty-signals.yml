@@ -1,9 +1,12 @@
-name: NIFTY/BANKNIFTY 5m Option Signals
+name: NIFTY 5m Option Signals
 
 on:
   schedule:
     - cron: "*/5 3-10 * * 1-5"
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   signal:
@@ -23,8 +26,20 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run option signal check
+      - name: Run NIFTY signal check
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python nifty_pro_tracker.py --once
+
+      - name: Commit tracker state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .tracker_state.json
+          if git diff --cached --quiet; then
+            echo "No tracker state changes to commit."
+            exit 0
+          fi
+          git commit -m "chore: update tracker state [skip ci]"
+          git push
