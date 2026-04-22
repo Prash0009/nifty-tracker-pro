@@ -2,7 +2,7 @@ name: NIFTY 5m Option Signals
 
 on:
   schedule:
-    - cron: "*/5 3-10 * * 1-5"
+    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 3-10 * * 1-5"
   workflow_dispatch:
 
 permissions:

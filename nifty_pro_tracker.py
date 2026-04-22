@@ -4,7 +4,8 @@ import argparse
 import json
 import math
 import os
-from dataclasses import asdict, dataclass
+import time
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, time as clock_time, timedelta
 from pathlib import Path
 from typing import Literal
@@ -69,13 +70,15 @@ class TrackerResult:
     stop_loss: float | None = None
     target: float | None = None
     pnl_points: float | None = None
+    signal_state: str | None = None
     should_alert: bool = False
     hourly_summary: bool = False
+    signal_changed: bool = False
 
     def alert_key(self) -> str:
         return (
-            f"{self.time.isoformat()}:{self.status}:{self.option_type or 'NA'}:"
-            f"{self.strike or 'NA'}:{round(self.spot_price, 2)}:{int(self.hourly_summary)}"
+            f"{self.status}:{self.option_type or 'NA'}:{self.strike or 'NA'}:"
+            f"{self.signal_state or 'NA'}"
         )
 
 
@@ -108,6 +111,7 @@ def default_state() -> dict:
         "last_hold_alert_at": None,
         "last_hourly_alert_at": None,
         "last_signal_bucket": None,
+        "last_signal_signature": None,
     }
 
 
@@ -516,6 +520,84 @@ def evaluate_trade(trade: Trade, snapshot: LiveIndexSnapshot) -> tuple[str, floa
     return "HOLD", pnl_points
 
 
+def classify_signal_watch(row: pd.Series) -> tuple[str, str]:
+    required = ["ema_9", "ema_21", "rsi", "macd_hist"]
+    if any(pd.isna(row.get(col)) for col in required):
+        return "Warming up", "Indicator context is still warming up."
+
+    ema_9 = float(row["ema_9"])
+    ema_21 = float(row["ema_21"])
+    rsi = float(row["rsi"])
+    macd_hist = float(row["macd_hist"])
+    body_strength = float(row.get("body_strength", 0))
+    close_location = float(row.get("close_location", 0.5))
+    breakout_up = bool(
+        not pd.isna(row.get("prev_high_3")) and float(row["close"]) > float(row["prev_high_3"])
+    )
+    breakout_down = bool(
+        not pd.isna(row.get("prev_low_3")) and float(row["close"]) < float(row["prev_low_3"])
+    )
+
+    bullish_watch = ema_9 > ema_21 and macd_hist > 0 and rsi >= 55
+    bearish_watch = ema_9 < ema_21 and macd_hist < 0 and rsi <= 45
+
+    if bullish_watch and not bearish_watch:
+        readiness = []
+        if breakout_up:
+            readiness.append("breakout seen")
+        if body_strength >= 0.12:
+            readiness.append("body strong")
+        if close_location >= 0.62:
+            readiness.append("close strong")
+        readiness_text = ", ".join(readiness) if readiness else "waiting for cleaner breakout/body confirmation"
+        return (
+            "Bullish watch",
+            (
+                f"Bullish watch for a CE setup. EMA9 {ema_9:.2f} is above EMA21 {ema_21:.2f}, "
+                f"RSI {rsi:.1f}, MACD hist {macd_hist:.2f}; {readiness_text}."
+            ),
+        )
+
+    if bearish_watch and not bullish_watch:
+        readiness = []
+        if breakout_down:
+            readiness.append("breakdown seen")
+        if body_strength >= 0.12:
+            readiness.append("body strong")
+        if close_location <= 0.38:
+            readiness.append("close weak")
+        readiness_text = ", ".join(readiness) if readiness else "waiting for cleaner breakdown/body confirmation"
+        return (
+            "Bearish watch",
+            (
+                f"Bearish watch for a PE setup. EMA9 {ema_9:.2f} is below EMA21 {ema_21:.2f}, "
+                f"RSI {rsi:.1f}, MACD hist {macd_hist:.2f}; {readiness_text}."
+            ),
+        )
+
+    return (
+        "Neutral wait",
+        (
+            f"Wait. No clean directional edge yet. EMA9 {ema_9:.2f}, EMA21 {ema_21:.2f}, "
+            f"RSI {rsi:.1f}, MACD hist {macd_hist:.2f}."
+        ),
+    )
+
+
+def apply_signal_change_alert(state: dict, result: TrackerResult) -> tuple[TrackerResult, dict]:
+    signature = result.alert_key()
+    previous_signature = state.get("last_signal_signature")
+    signal_changed = previous_signature is not None and previous_signature != signature
+    state["last_signal_signature"] = signature
+
+    if signal_changed and result.status not in {"BUY", "SELL"}:
+        result = replace(result, should_alert=True, signal_changed=True)
+    elif signal_changed:
+        result = replace(result, signal_changed=True)
+
+    return result, state
+
+
 def should_send_hold_alert(state: dict, current: datetime, hold_interval_minutes: int) -> bool:
     last = parse_dt(state.get("last_hold_alert_at"))
     if last is None:
@@ -550,10 +632,11 @@ def run_live_cycle(
                 f"Stale NSE live data. Latest update is {data_age}. "
                 f"Allowed maximum is {max_data_age_minutes} minutes."
             ),
+            signal_state="Stale data",
             should_alert=should_send_hourly_alert(state, now_ist(), hourly_interval_minutes),
             hourly_summary=should_send_hourly_alert(state, now_ist(), hourly_interval_minutes),
         )
-        return result, state
+        return apply_signal_change_alert(state, result)
 
     active_trade = load_trade(state.get("active_trade"))
     current = now_ist()
@@ -594,10 +677,11 @@ def run_live_cycle(
             stop_loss=active_trade.stop_loss,
             target=active_trade.target,
             pnl_points=pnl_points,
+            signal_state=f"Active {active_trade.option_type}",
             should_alert=send_hold or hourly_summary,
             hourly_summary=hourly_summary,
         )
-        return result, state
+        return apply_signal_change_alert(state, result)
 
     frame = candles_to_frame(state["candles"])
     enriched = enrich_candles(frame)
@@ -609,10 +693,11 @@ def run_live_cycle(
             spot_price=snapshot.last,
             time=snapshot.timestamp,
             reason="No candle history yet. Waiting for live data to build 5-minute candle context.",
+            signal_state="Warming up",
             should_alert=hourly_summary,
             hourly_summary=hourly_summary,
         )
-        return result, state
+        return apply_signal_change_alert(state, result)
 
     if len(enriched) < 25:
         result = TrackerResult(
@@ -624,14 +709,16 @@ def run_live_cycle(
                 f"Warming up candle history. Need about 25 stored 5-minute candles, "
                 f"currently have {len(enriched)}."
             ),
+            signal_state="Warming up",
             should_alert=hourly_summary,
             hourly_summary=hourly_summary,
         )
-        return result, state
+        return apply_signal_change_alert(state, result)
 
     latest = enriched.iloc[-1]
     bucket = latest["time"].isoformat()
     entry = build_entry_signal_from_row(latest)
+    watch_state, watch_reason = classify_signal_watch(latest)
 
     if entry and state.get("last_signal_bucket") != bucket:
         trade = Trade(
@@ -656,24 +743,22 @@ def run_live_cycle(
             score=trade.score,
             stop_loss=trade.stop_loss,
             target=trade.target,
+            signal_state=f"Active {trade.option_type}",
             should_alert=True,
         )
-        return result, state
+        return apply_signal_change_alert(state, result)
 
     result = TrackerResult(
         status="WAIT",
         title="NIFTY Signal",
         spot_price=snapshot.last,
         time=snapshot.timestamp,
-        reason=(
-            f"Wait. Latest candle score not strong enough for a new entry. "
-            f"EMA9 {latest['ema_9']:.2f}, EMA21 {latest['ema_21']:.2f}, "
-            f"RSI {latest['rsi']:.1f}, MACD hist {latest['macd_hist']:.2f}."
-        ),
+        reason=watch_reason,
+        signal_state=watch_state,
         should_alert=hourly_summary,
         hourly_summary=hourly_summary,
     )
-    return result, state
+    return apply_signal_change_alert(state, result)
 
 
 def format_result(result: TrackerResult) -> str:
@@ -684,6 +769,8 @@ def format_result(result: TrackerResult) -> str:
     ]
     if result.option_type and result.strike:
         lines.append(f"Option idea: NIFTY {result.strike} {result.option_type}")
+    if result.signal_state:
+        lines.append(f"Signal watch: {result.signal_state}")
     if result.score:
         lines.append(f"Score: {result.score:.2f}")
     lines.append(f"Reason: {result.reason}")
@@ -693,6 +780,8 @@ def format_result(result: TrackerResult) -> str:
         lines.append(f"Underlying target: {result.target:.2f}")
     if result.pnl_points is not None:
         lines.append(f"Running P&L (underlying points): {result.pnl_points:.2f}")
+    if result.signal_changed:
+        lines.append("Signal change: yes")
     if result.hourly_summary:
         lines.append("Hourly summary: yes")
     return "\n".join(lines)
@@ -934,41 +1023,33 @@ def run_backtest(range_: str = "30d") -> str:
     return build_backtest_report(trades, range_, open_trade=active)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="NIFTY live option tracker")
-    parser.add_argument("--once", action="store_true", help="Run a single live cycle and exit.")
-    parser.add_argument("--backtest", action="store_true", help="Run historical backtest instead of live tracking.")
-    parser.add_argument("--backtest-range", default="30d", help="Yahoo range for backtest, for example 30d or 60d.")
-    parser.add_argument("--ignore-market-hours", action="store_true", help="Run even outside NSE market hours.")
-    parser.add_argument("--max-data-age-minutes", type=int, default=15)
-    parser.add_argument("--hold-update-minutes", type=int, default=DEFAULT_HOLD_INTERVAL_MINUTES)
-    parser.add_argument("--hourly-summary-minutes", type=int, default=DEFAULT_HOURLY_INTERVAL_MINUTES)
-    args = parser.parse_args()
-
-    load_dotenv()
-
-    if args.backtest:
-        print(run_backtest(range_=args.backtest_range))
-        return
-
+def run_live_once(
+    *,
+    ignore_market_hours: bool,
+    max_data_age_minutes: int,
+    hold_update_minutes: int,
+    hourly_summary_minutes: int,
+) -> None:
     state = load_state()
-    if not args.ignore_market_hours and not is_market_open():
+    if not ignore_market_hours and not is_market_open():
         result = TrackerResult(
             status="WAIT",
             title="NIFTY Signal",
             spot_price=0,
             time=now_ist(),
             reason="Market is closed. Waiting for next NSE session.",
+            signal_state="Market closed",
             should_alert=False,
         )
         print(format_result(result))
+        print()
         return
 
     result, updated_state = run_live_cycle(
         state=state,
-        max_data_age_minutes=args.max_data_age_minutes,
-        hold_interval_minutes=args.hold_update_minutes,
-        hourly_interval_minutes=args.hourly_summary_minutes,
+        max_data_age_minutes=max_data_age_minutes,
+        hold_interval_minutes=hold_update_minutes,
+        hourly_interval_minutes=hourly_summary_minutes,
     )
     print(format_result(result))
     print()
@@ -981,6 +1062,44 @@ def main() -> None:
             updated_state["last_hourly_alert_at"] = to_iso(now_ist())
 
     save_state(updated_state)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="NIFTY live option tracker")
+    parser.add_argument("--once", action="store_true", help="Run a single live cycle and exit.")
+    parser.add_argument("--loop", action="store_true", help="Run continuously instead of exiting after one pass.")
+    parser.add_argument("--backtest", action="store_true", help="Run historical backtest instead of live tracking.")
+    parser.add_argument("--backtest-range", default="30d", help="Yahoo range for backtest, for example 30d or 60d.")
+    parser.add_argument("--ignore-market-hours", action="store_true", help="Run even outside NSE market hours.")
+    parser.add_argument("--max-data-age-minutes", type=int, default=15)
+    parser.add_argument("--hold-update-minutes", type=int, default=DEFAULT_HOLD_INTERVAL_MINUTES)
+    parser.add_argument("--hourly-summary-minutes", type=int, default=DEFAULT_HOURLY_INTERVAL_MINUTES)
+    parser.add_argument("--poll-seconds", type=int, default=120, help="Sleep interval between cycles in loop mode.")
+    args = parser.parse_args()
+
+    load_dotenv()
+
+    if args.backtest:
+        print(run_backtest(range_=args.backtest_range))
+        return
+
+    if args.loop:
+        while True:
+            run_live_once(
+                ignore_market_hours=args.ignore_market_hours,
+                max_data_age_minutes=args.max_data_age_minutes,
+                hold_update_minutes=args.hold_update_minutes,
+                hourly_summary_minutes=args.hourly_summary_minutes,
+            )
+            time.sleep(max(args.poll_seconds, 30))
+        return
+
+    run_live_once(
+        ignore_market_hours=args.ignore_market_hours,
+        max_data_age_minutes=args.max_data_age_minutes,
+        hold_update_minutes=args.hold_update_minutes,
+        hourly_summary_minutes=args.hourly_summary_minutes,
+    )
 
 
 if __name__ == "__main__":

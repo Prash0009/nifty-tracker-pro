@@ -14,6 +14,7 @@ It fetches live NIFTY 50 data from NSE, maintains 5-minute signal state, sends `
 - Tighter weighted scoring with EMA, RSI, MACD, breadth, candle-body, and breakout filters
 - ATM option idea: `NIFTY CE` or `NIFTY PE`
 - Stateful `HOLD` and `SELL` tracking
+- Immediate alert when the watch state changes
 - Hourly Telegram summary
 - Backtest mode with win/loss tables and drawdown
 - Stale-data protection
@@ -42,6 +43,19 @@ TELEGRAM_CHAT_ID=your_chat_id
 python nifty_pro_tracker.py --once
 ```
 
+## Run Continuously Every 2 Minutes
+
+```bash
+python nifty_pro_tracker.py --loop --poll-seconds 120
+```
+
+This is the better mode for a VPS or cloud worker because it gives you:
+
+- immediate `BUY` and `SELL` alerts
+- `HOLD` updates every 2 minutes while a trade is active
+- immediate alert when the signal watch flips between bullish, bearish, and neutral
+- hourly status messages even when there is no new trade
+
 ## Run Backtest
 
 ```bash
@@ -65,7 +79,18 @@ To send Telegram alerts from GitHub:
    - `TELEGRAM_CHAT_ID`
 4. Go to `Actions` > `NIFTY 5m Option Signals` > `Run workflow` to test it.
 
-GitHub Actions schedules are not guaranteed to fire at the exact second, and the shortest supported interval is once every 5 minutes. That means true 2-minute Telegram `HOLD` updates are not possible on GitHub-hosted schedules alone. The code supports frequent `HOLD` updates, but for actual 2-minute delivery you would need a VPS, cloud scheduler, or broker-hosted automation.
+GitHub Actions schedules are not guaranteed to fire at the exact second, and the shortest supported interval is once every 5 minutes. That means true 2-minute Telegram `HOLD` updates are not possible on GitHub-hosted schedules alone. The code supports 2-minute monitoring, but for actual 2-minute delivery you should run the tracker in `--loop` mode on a VPS, cloud worker, or broker-hosted automation.
+
+## Better Trigger Plan
+
+For this strategy, the cleanest setup is:
+
+1. Run the tracker continuously every 2 minutes on a cloud worker using `--loop --poll-seconds 120`.
+2. Keep `BUY`, `SELL`, and signal-watch changes as immediate Telegram alerts.
+3. Keep `HOLD` updates every 2 minutes only while a trade is active.
+4. Keep an hourly Telegram status no matter what the current state is.
+
+If you must stay on GitHub-only hosting, use the workflow as a 5-minute fallback. That is still acceptable for a candle-close entry strategy, because entries are only taken after a confirmed 5-minute candle close anyway.
 
 ## Tune The Strategy
 
