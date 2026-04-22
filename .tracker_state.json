@@ -1,7 +1,23 @@
 {
   "active_trade": null,
-  "candles": [],
+  "candles": [
+    {
+      "advances": 20,
+      "bucket": "2026-04-22T11:35:00+05:30",
+      "close": 24436.8,
+      "day_high": 24515.95,
+      "day_low": 24352.9,
+      "day_open": 24470.85,
+      "declines": 30,
+      "high": 24436.8,
+      "low": 24436.8,
+      "open": 24436.8,
+      "percent_change": -0.57,
+      "previous_close": 24576.6,
+      "snapshot_time": "2026-04-22T11:37:00+05:30"
+    }
+  ],
   "last_hold_alert_at": null,
-  "last_hourly_alert_at": null,
+  "last_hourly_alert_at": "2026-04-22T11:38:37.481794+05:30",
   "last_signal_bucket": null
 }
