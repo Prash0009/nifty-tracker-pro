@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, time as clock_time, timedelta
@@ -234,6 +235,30 @@ def candles_to_frame(candles: list[dict]) -> pd.DataFrame:
 
 def enrich_candles(frame: pd.DataFrame) -> pd.DataFrame:
     candles = frame.copy()
+    candles = candles.sort_values("time").reset_index(drop=True)
+    session = candles["time"].dt.date
+
+    if "day_open" not in candles:
+        candles["day_open"] = candles.groupby(session)["open"].transform("first")
+    if "day_high" not in candles:
+        candles["day_high"] = candles.groupby(session)["high"].cummax()
+    if "day_low" not in candles:
+        candles["day_low"] = candles.groupby(session)["low"].cummin()
+    if "previous_close" not in candles:
+        day_last_close = candles.groupby(session)["close"].last().shift(1)
+        candles["previous_close"] = session.map(day_last_close).astype("float64")
+        candles["previous_close"] = candles["previous_close"].fillna(candles["close"].shift(1))
+    if "percent_change" not in candles:
+        candles["percent_change"] = (
+            (candles["close"] - candles["previous_close"])
+            / candles["previous_close"].replace(0, pd.NA)
+            * 100
+        ).fillna(0)
+    if "advances" not in candles:
+        candles["advances"] = pd.NA
+    if "declines" not in candles:
+        candles["declines"] = pd.NA
+
     candles["ema_9"] = candles["close"].ewm(span=9, adjust=False).mean()
     candles["ema_21"] = candles["close"].ewm(span=21, adjust=False).mean()
 
@@ -250,6 +275,7 @@ def enrich_candles(frame: pd.DataFrame) -> pd.DataFrame:
     candles["macd"] = ema_12 - ema_26
     candles["macd_signal"] = candles["macd"].ewm(span=9, adjust=False).mean()
     candles["macd_hist"] = candles["macd"] - candles["macd_signal"]
+    candles["prev_macd_hist"] = candles["macd_hist"].shift(1)
 
     previous_close = candles["close"].shift(1)
     true_range = pd.concat(
@@ -263,10 +289,18 @@ def enrich_candles(frame: pd.DataFrame) -> pd.DataFrame:
     candles["atr"] = true_range.ewm(alpha=1 / 14, adjust=False).mean()
     candles["prev_high_3"] = candles["high"].shift(1).rolling(3).max()
     candles["prev_low_3"] = candles["low"].shift(1).rolling(3).min()
+    candles["body"] = candles["close"] - candles["open"]
+    candles["body_strength"] = (
+        candles["body"].abs() / candles["atr"].replace(0, pd.NA)
+    ).fillna(0)
+    candles["ema_gap_ratio"] = (
+        (candles["ema_9"] - candles["ema_21"]).abs() / candles["close"].replace(0, pd.NA)
+    ).fillna(0)
     candles["close_location"] = (
         (candles["close"] - candles["day_low"])
         / (candles["day_high"] - candles["day_low"]).replace(0, pd.NA)
     ).fillna(0.5)
+    candles["breadth_available"] = candles["advances"].notna() & candles["declines"].notna()
     candles["breadth_ratio"] = (
         (candles["advances"] - candles["declines"])
         / (candles["advances"] + candles["declines"]).replace(0, pd.NA)
@@ -275,7 +309,17 @@ def enrich_candles(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_entry_signal_from_row(row: pd.Series) -> dict | None:
-    if any(pd.isna(row[col]) for col in ["ema_9", "ema_21", "rsi", "macd_hist", "atr"]):
+    required = [
+        "ema_9",
+        "ema_21",
+        "rsi",
+        "macd_hist",
+        "prev_macd_hist",
+        "atr",
+        "prev_high_3",
+        "prev_low_3",
+    ]
+    if any(pd.isna(row[col]) for col in required):
         return None
 
     atr = max(float(row["atr"]), 10.0)
@@ -283,70 +327,151 @@ def build_entry_signal_from_row(row: pd.Series) -> dict | None:
     percent_change = float(row["percent_change"])
     close_location = float(row["close_location"])
     breadth_ratio = float(row["breadth_ratio"])
-    breakout_up = pd.notna(row["prev_high_3"]) and price > float(row["prev_high_3"])
-    breakout_down = pd.notna(row["prev_low_3"]) and price < float(row["prev_low_3"])
+    breakout_up = price > float(row["prev_high_3"])
+    breakout_down = price < float(row["prev_low_3"])
+    breakout_buffer_up = (price - float(row["prev_high_3"])) / atr
+    breakout_buffer_down = (float(row["prev_low_3"]) - price) / atr
+    macd_rising = float(row["macd_hist"]) > float(row["prev_macd_hist"])
+    macd_falling = float(row["macd_hist"]) < float(row["prev_macd_hist"])
+    body = float(row["body"])
+    body_strength = float(row["body_strength"])
+    ema_gap_ratio = float(row["ema_gap_ratio"])
+    above_session_bias = price > float(row["day_open"]) and price > float(row["previous_close"])
+    below_session_bias = price < float(row["day_open"]) and price < float(row["previous_close"])
+    breadth_available = bool(row.get("breadth_available", False))
 
     bullish_score = 0.0
     bearish_score = 0.0
 
     if row["ema_9"] > row["ema_21"]:
         bullish_score += 20
+    if ema_gap_ratio >= 0.0009:
+        bullish_score += 10
+    elif ema_gap_ratio >= 0.0005:
+        bullish_score += 5
     if row["macd_hist"] > 0:
-        bullish_score += 18
-    if 54 <= row["rsi"] <= 72:
-        bullish_score += 16
-    if percent_change >= 0.18:
-        bullish_score += min(percent_change * 50, 15)
-    if breadth_ratio > 0.08:
-        bullish_score += min(breadth_ratio * 100, 15)
-    if close_location >= 0.67:
+        bullish_score += 14
+    if macd_rising:
         bullish_score += 8
-    if breakout_up:
+    if 58 <= row["rsi"] <= 68:
+        bullish_score += 14
+    elif 55 <= row["rsi"] < 58 or 68 < row["rsi"] <= 71:
+        bullish_score += 7
+    if body > 0 and body_strength >= 0.20:
+        bullish_score += 10
+    elif body > 0 and body_strength >= 0.12:
+        bullish_score += 5
+    if breakout_up and breakout_buffer_up >= 0.15:
         bullish_score += 12
+    elif breakout_up:
+        bullish_score += 6
+    if close_location >= 0.72:
+        bullish_score += 8
+    elif close_location >= 0.62:
+        bullish_score += 4
+    if above_session_bias:
+        bullish_score += 10
+    if percent_change >= 0.30:
+        bullish_score += 6
+    elif percent_change >= 0.18:
+        bullish_score += 3
+    if breadth_available:
+        if breadth_ratio > 0.10:
+            bullish_score += 8
+        elif breadth_ratio > 0.05:
+            bullish_score += 4
 
     if row["ema_9"] < row["ema_21"]:
         bearish_score += 20
+    if ema_gap_ratio >= 0.0009:
+        bearish_score += 10
+    elif ema_gap_ratio >= 0.0005:
+        bearish_score += 5
     if row["macd_hist"] < 0:
-        bearish_score += 18
-    if 28 <= row["rsi"] <= 46:
-        bearish_score += 16
-    if percent_change <= -0.18:
-        bearish_score += min(abs(percent_change) * 50, 15)
-    if breadth_ratio < -0.08:
-        bearish_score += min(abs(breadth_ratio) * 100, 15)
-    if close_location <= 0.33:
+        bearish_score += 14
+    if macd_falling:
         bearish_score += 8
-    if breakout_down:
+    if 32 <= row["rsi"] <= 42:
+        bearish_score += 14
+    elif 29 <= row["rsi"] < 32 or 42 < row["rsi"] <= 45:
+        bearish_score += 7
+    if body < 0 and body_strength >= 0.20:
+        bearish_score += 10
+    elif body < 0 and body_strength >= 0.12:
+        bearish_score += 5
+    if breakout_down and breakout_buffer_down >= 0.15:
         bearish_score += 12
+    elif breakout_down:
+        bearish_score += 6
+    if close_location <= 0.28:
+        bearish_score += 8
+    elif close_location <= 0.38:
+        bearish_score += 4
+    if below_session_bias:
+        bearish_score += 10
+    if percent_change <= -0.30:
+        bearish_score += 6
+    elif percent_change <= -0.18:
+        bearish_score += 3
+    if breadth_available:
+        if breadth_ratio < -0.10:
+            bearish_score += 8
+        elif breadth_ratio < -0.05:
+            bearish_score += 4
+
+    bullish_valid = (
+        row["ema_9"] > row["ema_21"]
+        and row["macd_hist"] > 0
+        and macd_rising
+        and 55 <= row["rsi"] <= 71
+        and body > 0
+        and body_strength >= 0.12
+        and breakout_up
+        and breakout_buffer_up >= 0.08
+        and above_session_bias
+        and close_location >= 0.62
+    )
+    bearish_valid = (
+        row["ema_9"] < row["ema_21"]
+        and row["macd_hist"] < 0
+        and macd_falling
+        and 29 <= row["rsi"] <= 45
+        and body < 0
+        and body_strength >= 0.12
+        and breakout_down
+        and breakout_buffer_down >= 0.08
+        and below_session_bias
+        and close_location <= 0.38
+    )
 
     strike = round_to_strike(price)
-    if bullish_score >= 60 and bullish_score > bearish_score:
+    if bullish_valid and bullish_score >= 78 and bullish_score > bearish_score + 6:
         return {
             "status": "BUY",
             "option_type": "CE",
             "strike": strike,
             "score": round(bullish_score, 2),
-            "stop_loss": round(price - max(1.2 * atr, 18), 2),
-            "target": round(price + max(1.8 * atr, 28), 2),
+            "stop_loss": round(price - max(1.15 * atr, 16), 2),
+            "target": round(price + max(2.0 * atr, 30), 2),
             "reason": (
-                f"Candle close confirmation for NIFTY {strike} CE. "
-                f"EMA9 above EMA21, MACD positive, RSI {row['rsi']:.1f}, "
-                f"breadth {breadth_ratio:.2f}, pct {percent_change:.2f}%."
+                f"Confirmed 5-minute candle close for NIFTY {strike} CE. "
+                f"Score {bullish_score:.1f}, RSI {row['rsi']:.1f}, "
+                f"MACD improving, breakout above recent highs, pct {percent_change:.2f}%."
             ),
         }
 
-    if bearish_score >= 60 and bearish_score > bullish_score:
+    if bearish_valid and bearish_score >= 78 and bearish_score > bullish_score + 6:
         return {
             "status": "BUY",
             "option_type": "PE",
             "strike": strike,
             "score": round(bearish_score, 2),
-            "stop_loss": round(price + max(1.2 * atr, 18), 2),
-            "target": round(price - max(1.8 * atr, 28), 2),
+            "stop_loss": round(price + max(1.15 * atr, 16), 2),
+            "target": round(price - max(2.0 * atr, 30), 2),
             "reason": (
-                f"Candle close confirmation for NIFTY {strike} PE. "
-                f"EMA9 below EMA21, MACD negative, RSI {row['rsi']:.1f}, "
-                f"breadth {breadth_ratio:.2f}, pct {percent_change:.2f}%."
+                f"Confirmed 5-minute candle close for NIFTY {strike} PE. "
+                f"Score {bearish_score:.1f}, RSI {row['rsi']:.1f}, "
+                f"MACD weakening, breakdown below recent lows, pct {percent_change:.2f}%."
             ),
         }
 
@@ -586,12 +711,185 @@ def send_telegram(message: str) -> None:
     response.raise_for_status()
 
 
+def format_table(headers: list[str], rows: list[list[object]]) -> str:
+    if not rows:
+        return "No rows"
+
+    widths = [len(header) for header in headers]
+    normalized_rows: list[list[str]] = []
+    for row in rows:
+        normalized = [str(cell) for cell in row]
+        normalized_rows.append(normalized)
+        widths = [max(width, len(cell)) for width, cell in zip(widths, normalized)]
+
+    header_line = " | ".join(header.ljust(width) for header, width in zip(headers, widths))
+    separator = "-+-".join("-" * width for width in widths)
+    row_lines = [
+        " | ".join(cell.ljust(width) for cell, width in zip(row, widths))
+        for row in normalized_rows
+    ]
+    return "\n".join([header_line, separator, *row_lines])
+
+
+def max_consecutive(values: list[bool], target: bool) -> int:
+    best = 0
+    current = 0
+    for value in values:
+        if value is target:
+            current += 1
+            best = max(best, current)
+        else:
+            current = 0
+    return best
+
+
+def build_backtest_report(trades: list[dict], range_: str, open_trade: dict | None = None) -> str:
+    if not trades:
+        lines = [
+            "Backtest Summary",
+            f"Range: {range_}",
+            "Trades: 0",
+            "No completed trades for the current tighter filters.",
+        ]
+        if open_trade:
+            lines.append(
+                f"Open trade at end: {open_trade['option_type']} {open_trade['strike']} "
+                f"from {open_trade['entry_time']:%Y-%m-%d %H:%M}"
+            )
+        return "\n".join(lines)
+
+    trade_frame = pd.DataFrame(trades)
+    trade_frame["result"] = trade_frame["pnl_points"].apply(lambda pnl: "WIN" if pnl > 0 else "LOSS")
+    trade_frame["cum_pnl"] = trade_frame["pnl_points"].cumsum()
+    trade_frame["equity_peak"] = trade_frame["cum_pnl"].cummax()
+    trade_frame["drawdown"] = trade_frame["equity_peak"] - trade_frame["cum_pnl"]
+
+    total_trades = len(trade_frame)
+    wins = int((trade_frame["result"] == "WIN").sum())
+    losses = int((trade_frame["result"] == "LOSS").sum())
+    win_rate = (wins / total_trades) * 100 if total_trades else 0
+    total_pnl = float(trade_frame["pnl_points"].sum())
+    avg_pnl = float(trade_frame["pnl_points"].mean())
+    gross_profit = float(trade_frame.loc[trade_frame["pnl_points"] > 0, "pnl_points"].sum())
+    gross_loss = float(trade_frame.loc[trade_frame["pnl_points"] < 0, "pnl_points"].sum())
+    avg_win = float(trade_frame.loc[trade_frame["pnl_points"] > 0, "pnl_points"].mean()) if wins else 0
+    avg_loss = float(trade_frame.loc[trade_frame["pnl_points"] < 0, "pnl_points"].mean()) if losses else 0
+    profit_factor = gross_profit / abs(gross_loss) if gross_loss else float("inf")
+    max_drawdown = float(trade_frame["drawdown"].max())
+    results = trade_frame["result"].eq("WIN").tolist()
+    max_win_streak = max_consecutive(results, True)
+    max_loss_streak = max_consecutive(results, False)
+
+    summary_lines = [
+        "Backtest Summary",
+        f"Range: {range_}",
+        f"Trades: {total_trades}",
+        f"Wins: {wins}",
+        f"Losses: {losses}",
+        f"Win rate: {win_rate:.2f}%",
+        f"Total P&L (underlying points): {total_pnl:.2f}",
+        f"Average P&L per trade: {avg_pnl:.2f}",
+        f"Average win: {avg_win:.2f}",
+        f"Average loss: {avg_loss:.2f}",
+        f"Profit factor: {profit_factor:.2f}" if math.isfinite(profit_factor) else "Profit factor: inf",
+        f"Max drawdown (points): {max_drawdown:.2f}",
+        f"Max consecutive wins: {max_win_streak}",
+        f"Max consecutive losses: {max_loss_streak}",
+    ]
+
+    option_summary = (
+        trade_frame.groupby("option_type")
+        .agg(
+            trades=("pnl_points", "size"),
+            wins=("result", lambda values: int((values == "WIN").sum())),
+            losses=("result", lambda values: int((values == "LOSS").sum())),
+            total_pnl=("pnl_points", "sum"),
+            avg_pnl=("pnl_points", "mean"),
+            best=("pnl_points", "max"),
+            worst=("pnl_points", "min"),
+        )
+        .reset_index()
+    )
+    option_rows = [
+        [
+            row["option_type"],
+            int(row["trades"]),
+            int(row["wins"]),
+            int(row["losses"]),
+            f"{(row['wins'] / row['trades']) * 100:.1f}%",
+            f"{row['total_pnl']:.2f}",
+            f"{row['avg_pnl']:.2f}",
+            f"{row['best']:.2f}",
+            f"{row['worst']:.2f}",
+        ]
+        for _, row in option_summary.iterrows()
+    ]
+
+    win_loss_rows = [
+        [
+            outcome,
+            len(group),
+            f"{group['pnl_points'].sum():.2f}",
+            f"{group['pnl_points'].mean():.2f}",
+            f"{group['bars_held'].mean():.1f}",
+        ]
+        for outcome, group in trade_frame.groupby("result")
+    ]
+
+    recent_rows = [
+        [
+            row["entry_time"].strftime("%m-%d %H:%M"),
+            row["exit_time"].strftime("%m-%d %H:%M"),
+            row["option_type"],
+            row["strike"],
+            row["exit_reason"],
+            row["bars_held"],
+            f"{row['pnl_points']:.2f}",
+        ]
+        for _, row in trade_frame.tail(8).iterrows()
+    ]
+
+    lines = summary_lines + [
+        "",
+        "Option Side Table",
+        format_table(
+            ["Side", "Trades", "Wins", "Losses", "Win%", "TotalPnL", "AvgPnL", "Best", "Worst"],
+            option_rows,
+        ),
+        "",
+        "Win/Loss Table",
+        format_table(
+            ["Result", "Trades", "TotalPnL", "AvgPnL", "AvgBars"],
+            win_loss_rows,
+        ),
+        "",
+        "Recent Trades",
+        format_table(
+            ["Entry", "Exit", "Opt", "Strike", "ExitReason", "Bars", "PnL"],
+            recent_rows,
+        ),
+    ]
+
+    if open_trade:
+        lines.extend(
+            [
+                "",
+                "Open trade at end:",
+                (
+                    f"{open_trade['option_type']} {open_trade['strike']} from "
+                    f"{open_trade['entry_time']:%Y-%m-%d %H:%M}"
+                ),
+            ]
+        )
+    return "\n".join(lines)
+
+
 def run_backtest(range_: str = "30d") -> str:
     candles = enrich_candles(fetch_yahoo_candles(range_=range_))
     active: dict | None = None
     trades: list[dict] = []
 
-    for _, row in candles.iterrows():
+    for idx, row in candles.iterrows():
         price = float(row["close"])
         if active:
             direction = 1 if active["option_type"] == "CE" else -1
@@ -608,9 +906,12 @@ def run_backtest(range_: str = "30d") -> str:
                         "exit_time": row["time"],
                         "option_type": active["option_type"],
                         "strike": active["strike"],
+                        "score": active["score"],
                         "entry_price": active["entry_price"],
                         "exit_price": price,
+                        "bars_held": idx - active["entry_index"],
                         "pnl_points": round(pnl, 2),
+                        "exit_reason": "target_or_stop",
                     }
                 )
                 active = None
@@ -621,40 +922,16 @@ def run_backtest(range_: str = "30d") -> str:
             if entry:
                 active = {
                     "entry_time": row["time"],
+                    "entry_index": idx,
                     "option_type": entry["option_type"],
                     "strike": entry["strike"],
+                    "score": entry["score"],
                     "entry_price": price,
                     "stop_loss": entry["stop_loss"],
                     "target": entry["target"],
                 }
 
-    total_trades = len(trades)
-    wins = sum(1 for trade in trades if trade["pnl_points"] > 0)
-    losses = sum(1 for trade in trades if trade["pnl_points"] <= 0)
-    total_pnl = round(sum(trade["pnl_points"] for trade in trades), 2)
-    avg_pnl = round(total_pnl / total_trades, 2) if total_trades else 0
-    win_rate = round((wins / total_trades) * 100, 2) if total_trades else 0
-
-    lines = [
-        "Backtest Summary",
-        f"Range: {range_}",
-        f"Trades: {total_trades}",
-        f"Wins: {wins}",
-        f"Losses: {losses}",
-        f"Win rate: {win_rate:.2f}%",
-        f"Total P&L (underlying points): {total_pnl:.2f}",
-        f"Average P&L per trade: {avg_pnl:.2f}",
-    ]
-    if trades:
-        last_trade = trades[-1]
-        lines.append(
-            "Last trade: "
-            f"{last_trade['option_type']} {last_trade['strike']} "
-            f"{last_trade['entry_time']:%Y-%m-%d %H:%M} -> "
-            f"{last_trade['exit_time']:%Y-%m-%d %H:%M}, "
-            f"PnL {last_trade['pnl_points']:.2f}"
-        )
-    return "\n".join(lines)
+    return build_backtest_report(trades, range_, open_trade=active)
 
 
 def main() -> None:

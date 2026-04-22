@@ -11,11 +11,11 @@ It fetches live NIFTY 50 data from NSE, maintains 5-minute signal state, sends `
 - NIFTY-only live tracking
 - 5-minute candle-based signal logic
 - Exact entry on confirmed candle close
-- Better weighted scoring with EMA, RSI, MACD, breadth, and breakout filters
+- Tighter weighted scoring with EMA, RSI, MACD, breadth, candle-body, and breakout filters
 - ATM option idea: `NIFTY CE` or `NIFTY PE`
 - Stateful `HOLD` and `SELL` tracking
 - Hourly Telegram summary
-- Backtest mode
+- Backtest mode with win/loss tables and drawdown
 - Stale-data protection
 - Optional Telegram alerts
 - NSE market-hour guard
@@ -71,8 +71,8 @@ GitHub Actions schedules are not guaranteed to fire at the exact second, and the
 
 The live engine is NIFTY-only and uses candle-close confirmation:
 
-- `BUY CE`: EMA 9 is above EMA 21, MACD histogram is positive, RSI is healthy, breadth is positive, and the latest candle breaks above recent highs with enough score.
-- `BUY PE`: EMA 9 is below EMA 21, MACD histogram is negative, RSI is weak, breadth is negative, and the latest candle breaks below recent lows with enough score.
+- `BUY CE`: EMA 9 is above EMA 21, MACD histogram is positive and improving, RSI is healthy, breadth/session structure is supportive, candle body is strong, and the latest candle breaks above recent highs with enough score.
+- `BUY PE`: EMA 9 is below EMA 21, MACD histogram is negative and weakening further, RSI is weak, breadth/session structure is supportive, candle body is strong, and the latest candle breaks below recent lows with enough score.
 - `HOLD`: An existing active trade is still valid and stop/target has not been hit.
 - `SELL`: An active trade hits stop-loss or target.
 - `WAIT`: No new valid entry.
