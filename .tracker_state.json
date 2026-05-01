@@ -288,7 +288,7 @@
     }
   ],
   "last_hold_alert_at": null,
-  "last_hourly_alert_at": "2026-05-01T11:51:07.584575+05:30",
+  "last_hourly_alert_at": "2026-05-01T13:58:02.519743+05:30",
   "last_signal_bucket": null,
   "last_signal_signature": "WAIT:NA:NA:Stale data"
 }
