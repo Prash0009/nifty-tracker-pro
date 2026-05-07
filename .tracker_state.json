@@ -360,10 +360,25 @@
       "percent_change": 0.19,
       "previous_close": 24032.8,
       "snapshot_time": "2026-05-06T11:40:00+05:30"
+    },
+    {
+      "advances": 21,
+      "bucket": "2026-05-07T11:45:00+05:30",
+      "close": 24286.0,
+      "day_high": 24423.35,
+      "day_low": 24284.0,
+      "day_open": 24398.5,
+      "declines": 29,
+      "high": 24286.0,
+      "low": 24286.0,
+      "open": 24286.0,
+      "percent_change": -0.18,
+      "previous_close": 24330.95,
+      "snapshot_time": "2026-05-07T11:45:00+05:30"
     }
   ],
   "last_hold_alert_at": null,
-  "last_hourly_alert_at": "2026-05-06T11:40:57.591298+05:30",
+  "last_hourly_alert_at": "2026-05-07T11:46:24.093831+05:30",
   "last_signal_bucket": null,
-  "last_signal_signature": "WAIT:NA:NA:Warming up"
+  "last_signal_signature": "WAIT:NA:NA:Neutral wait"
 }
