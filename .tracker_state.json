@@ -1170,10 +1170,25 @@
       "percent_change": -0.54,
       "previous_close": 24398.7,
       "snapshot_time": "2026-07-08T11:34:00+05:30"
+    },
+    {
+      "advances": 4,
+      "bucket": "2026-07-08T14:10:00+05:30",
+      "close": 23923.6,
+      "day_high": 24300.0,
+      "day_low": 23901.6,
+      "day_open": 24259.55,
+      "declines": 46,
+      "high": 23923.6,
+      "low": 23923.6,
+      "open": 23923.6,
+      "percent_change": -1.95,
+      "previous_close": 24398.7,
+      "snapshot_time": "2026-07-08T14:11:00+05:30"
     }
   ],
   "last_hold_alert_at": null,
-  "last_hourly_alert_at": "2026-07-08T11:34:31.392801+05:30",
+  "last_hourly_alert_at": "2026-07-08T14:12:25.431986+05:30",
   "last_signal_bucket": null,
-  "last_signal_signature": "WAIT:NA:NA:Bullish watch"
+  "last_signal_signature": "WAIT:NA:NA:Neutral wait"
 }
