@@ -2190,6 +2190,21 @@
       "percent_change": -0.25,
       "previous_close": 24366.0,
       "snapshot_time": "2026-08-17T09:25:00+05:30"
+    },
+    {
+      "advances": 14,
+      "bucket": "2026-08-17T10:20:00+05:30",
+      "close": 24261.45,
+      "day_high": 24357.6,
+      "day_low": 24259.4,
+      "day_open": 24343.45,
+      "declines": 35,
+      "high": 24261.45,
+      "low": 24261.45,
+      "open": 24261.45,
+      "percent_change": -0.43,
+      "previous_close": 24366.0,
+      "snapshot_time": "2026-08-17T10:20:00+05:30"
     }
   ],
   "last_hold_alert_at": null,
